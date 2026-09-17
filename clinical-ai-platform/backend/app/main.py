@@ -1,24 +1,38 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
+import logging
+import time
 import uuid
+from typing import List
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from .agent import run_suspecting_agent
+from .retrieval import load_records, retrieve
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("clinical-ai")
 
 app = FastAPI(
     title="Clinical AI Suspecting API",
-    version="0.1.0",
-    description="Synthetic clinical prospective suspecting portfolio project",
+    version="0.2.0",
+    description="Synthetic clinical prospective suspecting and RAG portfolio project",
 )
 
-
-class ClinicalRecord(BaseModel):
-    patient_id: str
-    text: str
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class Suspect(BaseModel):
     condition: str
     evidence: List[str]
     confidence: float
+    rationale: str
 
 
 class SuspectResponse(BaseModel):
@@ -27,46 +41,64 @@ class SuspectResponse(BaseModel):
     suspects: List[Suspect]
 
 
-def generate_demo_suspects(record: ClinicalRecord) -> List[Suspect]:
-    """Deterministic starter implementation.
+class SearchResponse(BaseModel):
+    patient_id: str
+    query: str
+    documents: List[str]
 
-    This will later be replaced by retrieval + LLM generation followed by
-    deterministic validation. Keeping the first version deterministic makes
-    the API testable without requiring external credentials.
-    """
-    text = record.text.lower()
-    suspects: List[Suspect] = []
 
-    if "a1c" in text or "hyperglycemia" in text:
-        suspects.append(
-            Suspect(
-                condition="Possible diabetes-related condition",
-                evidence=[record.text],
-                confidence=0.70,
-            )
-        )
-
-    if "hypertension" in text or "high blood pressure" in text:
-        suspects.append(
-            Suspect(
-                condition="Possible hypertension",
-                evidence=[record.text],
-                confidence=0.75,
-            )
-        )
-
-    return suspects
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    started = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    response.headers["x-request-id"] = request_id
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s duration_ms=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "service": "clinical-ai-suspecting-api"}
 
 
-@app.post("/api/v1/suspects", response_model=SuspectResponse)
-def create_suspects(record: ClinicalRecord) -> SuspectResponse:
+@app.get("/api/v1/patients")
+def patients() -> list[dict]:
+    return [{"patient_id": record["patient_id"]} for record in load_records()]
+
+
+@app.get("/api/v1/patients/{patient_id}/search", response_model=SearchResponse)
+def search_patient(patient_id: str, q: str) -> SearchResponse:
+    documents = retrieve(patient_id, q)
+    if not documents:
+        raise HTTPException(status_code=404, detail="Synthetic patient not found")
+    return SearchResponse(patient_id=patient_id, query=q, documents=documents)
+
+
+@app.post("/api/v1/patients/{patient_id}/suspects", response_model=SuspectResponse)
+def create_suspects(patient_id: str) -> SuspectResponse:
+    if not any(record["patient_id"] == patient_id for record in load_records()):
+        raise HTTPException(status_code=404, detail="Synthetic patient not found")
+
+    results = run_suspecting_agent(patient_id)
     return SuspectResponse(
         request_id=str(uuid.uuid4()),
-        patient_id=record.patient_id,
-        suspects=generate_demo_suspects(record),
+        patient_id=patient_id,
+        suspects=[
+            Suspect(
+                condition=result.condition,
+                evidence=result.evidence,
+                confidence=result.confidence,
+                rationale=result.rationale,
+            )
+            for result in results
+        ],
     )
