@@ -1,0 +1,23 @@
+[
+  {
+    "patient_id": "SYN-1001",
+    "documents": [
+      "Primary care note: Patient reports increased thirst and fatigue. A1C measured at 7.4 percent.",
+      "Medication review completed. No diabetes diagnosis appears in the synthetic problem list."
+    ]
+  },
+  {
+    "patient_id": "SYN-1002",
+    "documents": [
+      "Follow-up note: Blood pressure 158/96. Prior readings have also been elevated.",
+      "Synthetic problem list does not currently include hypertension."
+    ]
+  },
+  {
+    "patient_id": "SYN-1003",
+    "documents": [
+      "Annual visit: Patient exercises regularly. Blood pressure 118/76. Routine laboratory results reviewed.",
+      "No significant abnormalities documented in this synthetic encounter."
+    ]
+  }
+]
