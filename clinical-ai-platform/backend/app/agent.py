@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import List
 
-from .retrieval import retrieve
+from .llm import generate_with_llm
+from .vector_retrieval import vector_retrieve
 
 
 @dataclass
@@ -10,50 +11,54 @@ class AgentResult:
     evidence: List[str]
     confidence: float
     rationale: str
+    generation_mode: str = "deterministic"
 
 
-def _validate(result: AgentResult) -> AgentResult | None:
-    """Deterministic guardrail: never return a suspect without evidence."""
+def _validate(result: AgentResult, retrieved_context: List[str]) -> AgentResult | None:
+    """Evidence-grounding guardrail shared by LLM and deterministic paths."""
+    allowed = set(retrieved_context)
+    result.evidence = [item for item in result.evidence if item in allowed]
     if not result.evidence:
         return None
     result.confidence = min(max(result.confidence, 0.0), 1.0)
     return result
 
 
-def run_suspecting_agent(patient_id: str) -> List[AgentResult]:
-    """Tool-driven agent skeleton.
-
-    The agent calls retrieval as a tool, forms candidate hypotheses, then sends
-    each candidate through deterministic validation. This architecture keeps
-    retrieval and validation independent from whichever LLM provider is added
-    later.
-    """
-    context = retrieve(
-        patient_id,
-        "A1C hyperglycemia diabetes hypertension high blood pressure elevated",
-    )
+def _deterministic_candidates(context: List[str]) -> List[AgentResult]:
     joined = " ".join(context).lower()
     candidates: List[AgentResult] = []
-
     if "a1c" in joined or "hyperglycemia" in joined:
-        candidates.append(
-            AgentResult(
-                condition="Possible diabetes-related condition",
-                evidence=[doc for doc in context if "a1c" in doc.lower() or "hyperglycemia" in doc.lower()],
-                confidence=0.82,
-                rationale="Retrieved evidence contains a diabetes-related laboratory or clinical signal.",
-            )
-        )
-
+        candidates.append(AgentResult(
+            condition="Possible diabetes-related condition",
+            evidence=[d for d in context if "a1c" in d.lower() or "hyperglycemia" in d.lower()],
+            confidence=0.82,
+            rationale="Retrieved evidence contains a diabetes-related laboratory or clinical signal.",
+        ))
     if "158/96" in joined or "elevated" in joined or "hypertension" in joined:
-        candidates.append(
-            AgentResult(
-                condition="Possible hypertension",
-                evidence=[doc for doc in context if "158/96" in doc.lower() or "elevated" in doc.lower() or "hypertension" in doc.lower()],
-                confidence=0.84,
-                rationale="Retrieved evidence contains repeated or explicit elevated blood-pressure signals.",
-            )
-        )
+        candidates.append(AgentResult(
+            condition="Possible hypertension",
+            evidence=[d for d in context if "158/96" in d.lower() or "elevated" in d.lower() or "hypertension" in d.lower()],
+            confidence=0.84,
+            rationale="Retrieved evidence contains repeated or explicit elevated blood-pressure signals.",
+        ))
+    return candidates
 
-    validated = [_validate(candidate) for candidate in candidates]
+
+def run_suspecting_agent(patient_id: str) -> List[AgentResult]:
+    query = "potential documentation gaps involving diabetes A1C hyperglycemia hypertension elevated blood pressure"
+    context = vector_retrieve(patient_id, query)
+
+    generated = generate_with_llm(patient_id, context)
+    if generated is not None:
+        candidates = [AgentResult(
+            condition=item.condition,
+            evidence=item.evidence,
+            confidence=item.confidence,
+            rationale=item.rationale,
+            generation_mode="llm",
+        ) for item in generated]
+    else:
+        candidates = _deterministic_candidates(context)
+
+    validated = [_validate(candidate, context) for candidate in candidates]
     return [candidate for candidate in validated if candidate is not None]
